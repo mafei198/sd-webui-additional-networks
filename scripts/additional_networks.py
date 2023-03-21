@@ -1,252 +1,258 @@
 import os
+from typing import List
 
 import torch
 import numpy as np
+from pydantic import BaseModel, Field
 
 import modules.scripts as scripts
 from modules import shared, script_callbacks
 import gradio as gr
 
 import modules.ui
+from modules.api import api
 
 from scripts import lora_compvis, model_util, metadata_editor, xyz_grid_support
 from scripts.model_util import lora_models, MAX_MODEL_COUNT
 
-
-memo_symbol = '\U0001F4DD' # 📝
+memo_symbol = '\U0001F4DD'  # 📝
 addnet_paste_params = {"txt2img": [], "img2img": []}
 
 
 class Script(scripts.Script):
-  def __init__(self) -> None:
-    super().__init__()
-    self.latest_params = [(None, None, None, None)] * MAX_MODEL_COUNT
-    self.latest_networks = []
-    self.latest_model_hash = ""
+    latest_params = [(None, None, None, None)] * MAX_MODEL_COUNT
+    latest_networks = []
+    latest_model_hash = ""
 
-  def title(self):
-    return "Additional networks for generating"
+    def __init__(self) -> None:
+        super().__init__()
 
-  def show(self, is_img2img):
-    return scripts.AlwaysVisible
+    def title(self):
+        return "Additional networks for generating"
 
-  def ui(self, is_img2img):
-    global addnet_paste_params
-    # NOTE: Changing the contents of `ctrls` means the XY Grid support may need
-    # to be updated, see xyz_grid_support.py
-    ctrls = []
-    weight_sliders = []
-    model_dropdowns = []
+    def show(self, is_img2img):
+        return scripts.AlwaysVisible
 
-    tabname = "txt2img"
-    if is_img2img:
-      tabname = "img2img"
+    def ui(self, is_img2img):
+        global addnet_paste_params
+        # NOTE: Changing the contents of `ctrls` means the XY Grid support may need
+        # to be updated, see xyz_grid_support.py
+        ctrls = []
+        weight_sliders = []
+        model_dropdowns = []
 
-    paste_params = addnet_paste_params[tabname]
-    paste_params.clear()
+        tabname = "txt2img"
+        if is_img2img:
+            tabname = "img2img"
 
-    self.infotext_fields = []
-    self.paste_field_names = []
+        paste_params = addnet_paste_params[tabname]
+        paste_params.clear()
 
-    with gr.Group():
-      with gr.Accordion('Additional Networks', open=False):
-        with gr.Row():
-          enabled = gr.Checkbox(label='Enable', value=False)
-          ctrls.append(enabled)
-          self.infotext_fields.append((enabled, "AddNet Enabled"))
-          separate_weights = gr.Checkbox(label='Separate UNet/Text Encoder weights', value=False)
-          ctrls.append(separate_weights)
-          self.infotext_fields.append((separate_weights, "AddNet Separate Weights"))
+        self.infotext_fields = []
+        self.paste_field_names = []
 
-        for i in range(MAX_MODEL_COUNT):
-          with gr.Row():
-            module = gr.Dropdown(["LoRA"], label=f"Network module {i+1}", value="LoRA")
-            model = gr.Dropdown(list(lora_models.keys()),
-                                label=f"Model {i+1}",
-                                value="None")
-            with gr.Row(visible=False):
-              model_path = gr.Textbox(value="None", interactive=False, visible=False)
-            model.change(lambda module, model, i=i: model_util.lora_models.get(model, "None"), inputs=[module, model], outputs=[model_path])
+        with gr.Group():
+            with gr.Accordion('Additional Networks', open=False):
+                with gr.Row():
+                    enabled = gr.Checkbox(label='Enable', value=False)
+                    ctrls.append(enabled)
+                    self.infotext_fields.append((enabled, "AddNet Enabled"))
+                    separate_weights = gr.Checkbox(label='Separate UNet/Text Encoder weights', value=False)
+                    ctrls.append(separate_weights)
+                    self.infotext_fields.append((separate_weights, "AddNet Separate Weights"))
 
-            # Sending from the script UI to the metadata editor has to bypass
-            # gradio since this button will exit the gr.Blocks context by the
-            # time the metadata editor tab is created, so event handlers can't
-            # be registered on it by then.
-            model_info = gr.Button(value=memo_symbol, elem_id=f"additional_networks_send_to_metadata_editor_{i}")
-            model_info.click(fn=None, _js="addnet_send_to_metadata_editor", inputs=[module, model_path], outputs=[])
+                for i in range(MAX_MODEL_COUNT):
+                    with gr.Row():
+                        module = gr.Dropdown(["LoRA"], label=f"Network module {i + 1}", value="LoRA")
+                        model = gr.Dropdown(list(lora_models.keys()),
+                                            label=f"Model {i + 1}",
+                                            value="None")
+                        with gr.Row(visible=False):
+                            model_path = gr.Textbox(value="None", interactive=False, visible=False)
+                        model.change(lambda module, model, i=i: model_util.lora_models.get(model, "None"),
+                                     inputs=[module, model], outputs=[model_path])
 
-            module.change(lambda module, model, i=i: xyz_grid_support.update_axis_params(i, module, model), inputs=[module, model], outputs=[])
-            model.change(lambda module, model, i=i: xyz_grid_support.update_axis_params(i, module, model), inputs=[module, model], outputs=[])
+                        # Sending from the script UI to the metadata editor has to bypass
+                        # gradio since this button will exit the gr.Blocks context by the
+                        # time the metadata editor tab is created, so event handlers can't
+                        # be registered on it by then.
+                        model_info = gr.Button(value=memo_symbol,
+                                               elem_id=f"additional_networks_send_to_metadata_editor_{i}")
+                        model_info.click(fn=None, _js="addnet_send_to_metadata_editor", inputs=[module, model_path],
+                                         outputs=[])
 
-            # perhaps there is no user to train Text Encoder only, Weight A is U-Net
-            # The name of label will be changed in future (Weight A and B), but UNet and TEnc for now for easy understanding
-            with gr.Column() as col:
-              weight = gr.Slider(label=f"Weight {i+1}", value=1.0, minimum=-1.0, maximum=2.0, step=.05, visible=True)
-              weight_unet = gr.Slider(label=f"UNet Weight {i+1}", value=1.0, minimum=-1.0, maximum=2.0, step=.05, visible=False)
-              weight_tenc = gr.Slider(label=f"TEnc Weight {i+1}", value=1.0, minimum=-1.0, maximum=2.0, step=.05, visible=False)
+                        module.change(lambda module, model, i=i: xyz_grid_support.update_axis_params(i, module, model),
+                                      inputs=[module, model], outputs=[])
+                        model.change(lambda module, model, i=i: xyz_grid_support.update_axis_params(i, module, model),
+                                     inputs=[module, model], outputs=[])
 
-            weight.change(lambda w: (w, w), inputs=[weight], outputs=[weight_unet, weight_tenc])
-            paste_params.append({"module": module, "model": model})
+                        # perhaps there is no user to train Text Encoder only, Weight A is U-Net
+                        # The name of label will be changed in future (Weight A and B), but UNet and TEnc for now for easy understanding
+                        with gr.Column() as col:
+                            weight = gr.Slider(label=f"Weight {i + 1}", value=1.0, minimum=-1.0, maximum=2.0, step=.05,
+                                               visible=True)
+                            weight_unet = gr.Slider(label=f"UNet Weight {i + 1}", value=1.0, minimum=-1.0, maximum=2.0,
+                                                    step=.05, visible=False)
+                            weight_tenc = gr.Slider(label=f"TEnc Weight {i + 1}", value=1.0, minimum=-1.0, maximum=2.0,
+                                                    step=.05, visible=False)
 
-          ctrls.extend((module, model, weight_unet, weight_tenc))
-          weight_sliders.extend((weight, weight_unet, weight_tenc))
-          model_dropdowns.append(model)
+                        weight.change(lambda w: (w, w), inputs=[weight], outputs=[weight_unet, weight_tenc])
+                        paste_params.append({"module": module, "model": model})
 
-          self.infotext_fields.extend([
-              (module, f"AddNet Module {i+1}"),
-              (model, f"AddNet Model {i+1}"),
-              (weight, f"AddNet Weight {i+1}"),
-              (weight_unet, f"AddNet Weight A {i+1}"),
-              (weight_tenc, f"AddNet Weight B {i+1}"),
-          ])
+                    ctrls.extend((module, model, weight_unet, weight_tenc))
+                    weight_sliders.extend((weight, weight_unet, weight_tenc))
+                    model_dropdowns.append(model)
 
-        for _, field_name in self.infotext_fields:
-          self.paste_field_names.append(field_name)
+                    self.infotext_fields.extend([
+                        (module, f"AddNet Module {i + 1}"),
+                        (model, f"AddNet Model {i + 1}"),
+                        (weight, f"AddNet Weight {i + 1}"),
+                        (weight_unet, f"AddNet Weight A {i + 1}"),
+                        (weight_tenc, f"AddNet Weight B {i + 1}"),
+                    ])
 
-        def update_weight_sliders(separate, *sliders):
-          updates = []
-          for w, w_unet, w_tenc in zip(*(iter(sliders),) * 3):
-            if not separate:
-                w_unet = w
-                w_tenc = w
-            updates.append(gr.Slider.update(visible=not separate))            # Combined
-            updates.append(gr.Slider.update(visible=separate, value=w_unet))  # UNet
-            updates.append(gr.Slider.update(visible=separate, value=w_tenc))  # TEnc
-          return updates
-        separate_weights.change(update_weight_sliders, inputs=[separate_weights] + weight_sliders, outputs=weight_sliders)
+                for _, field_name in self.infotext_fields:
+                    self.paste_field_names.append(field_name)
 
-        def refresh_all_models(*dropdowns):
-          model_util.update_models()
-          updates = []
-          for dd in dropdowns:
-            if dd in lora_models:
-              selected = dd
-            else:
-              selected = "None"
-            update = gr.Dropdown.update(value=selected, choices=list(lora_models.keys()))
-            updates.append(update)
-          return updates
+                def update_weight_sliders(separate, *sliders):
+                    updates = []
+                    for w, w_unet, w_tenc in zip(*(iter(sliders),) * 3):
+                        if not separate:
+                            w_unet = w
+                            w_tenc = w
+                        updates.append(gr.Slider.update(visible=not separate))  # Combined
+                        updates.append(gr.Slider.update(visible=separate, value=w_unet))  # UNet
+                        updates.append(gr.Slider.update(visible=separate, value=w_tenc))  # TEnc
+                    return updates
 
-        # mask for regions
-        with gr.Accordion('Extra args', open=False):
-          with gr.Row():
-            mask_image = gr.Image(label='mask image:')
-            ctrls.append(mask_image)
+                separate_weights.change(update_weight_sliders, inputs=[separate_weights] + weight_sliders,
+                                        outputs=weight_sliders)
 
-        refresh_models = gr.Button(value='Refresh models')
-        refresh_models.click(refresh_all_models, inputs=model_dropdowns, outputs=model_dropdowns)
-        ctrls.append(refresh_models)
+                def refresh_all_models(*dropdowns):
+                    model_util.update_models()
+                    updates = []
+                    for dd in dropdowns:
+                        if dd in lora_models:
+                            selected = dd
+                        else:
+                            selected = "None"
+                        update = gr.Dropdown.update(value=selected, choices=list(lora_models.keys()))
+                        updates.append(update)
+                    return updates
 
-    return ctrls
+                # mask for regions
+                with gr.Accordion('Extra args', open=False):
+                    with gr.Row():
+                        mask_image = gr.Image(label='mask image:')
+                        ctrls.append(mask_image)
 
-  def set_infotext_fields(self, p, params):
-    for i, t in enumerate(params):
-      module, model, weight_unet, weight_tenc = t
-      if model is None or model == "None" or len(model) == 0 or (weight_unet == 0 and weight_tenc == 0):
-        continue
-      p.extra_generation_params.update({
-          "AddNet Enabled": True,
-          f"AddNet Module {i+1}": module,
-          f"AddNet Model {i+1}": model,
-          f"AddNet Weight A {i+1}": weight_unet,
-          f"AddNet Weight B {i+1}": weight_tenc,
-      })
+                refresh_models = gr.Button(value='Refresh models')
+                refresh_models.click(refresh_all_models, inputs=model_dropdowns, outputs=model_dropdowns)
+                ctrls.append(refresh_models)
 
-  def restore_networks(self, sd_model):
-    unet = sd_model.model.diffusion_model
-    text_encoder = sd_model.cond_stage_model
+        return ctrls
 
-    if len(self.latest_networks) > 0:
-      print("restoring last networks")
-      for network, _ in self.latest_networks[::-1]:
-        network.restore(text_encoder, unet)
-      self.latest_networks.clear()
+    def set_infotext_fields(self, p, params):
+        for i, t in enumerate(params):
+            module, model, weight_unet, weight_tenc = t
+            if model is None or model == "None" or len(model) == 0 or (weight_unet == 0 and weight_tenc == 0):
+                continue
+            p.extra_generation_params.update({
+                "AddNet Enabled": True,
+                f"AddNet Module {i + 1}": module,
+                f"AddNet Model {i + 1}": model,
+                f"AddNet Weight A {i + 1}": weight_unet,
+                f"AddNet Weight B {i + 1}": weight_tenc,
+            })
 
-  def process_batch(self, p, *args, **kwargs):
-    unet = p.sd_model.model.diffusion_model
-    text_encoder = p.sd_model.cond_stage_model
+    def set_infotext_fields(self, p, params):
+        for i, t in enumerate(params):
+            module, model, weight_unet, weight_tenc = t
+            if model is None or model == "None" or len(model) == 0 or (weight_unet == 0 and weight_tenc == 0):
+                continue
+            p.extra_generation_params.update({
+                "AddNet Enabled": True,
+                f"AddNet Module {i + 1}": module,
+                f"AddNet Model {i + 1}": model,
+                f"AddNet Weight A {i + 1}": weight_unet,
+                f"AddNet Weight B {i + 1}": weight_tenc,
+            })
 
-    if not args[0]:
-      self.restore_networks(p.sd_model)
-      return
+    def restore_networks(self, sd_model):
+        unet = sd_model.model.diffusion_model
+        text_encoder = sd_model.cond_stage_model
 
-    params = []
-    for i, ctrl in enumerate(args[2:]):
-      if i % 4 == 0:
-        param = [ctrl]
-      else:
-        param.append(ctrl)
-        if i % 4 == 3:
-          params.append(param)
+        if len(Script.latest_networks) > 0:
+            print("restoring last networks")
+            for network, _ in Script.latest_networks[::-1]:
+                network.restore(text_encoder, unet)
+            Script.latest_networks.clear()
 
-    models_changed = (len(self.latest_networks) == 0)                   # no latest network (cleared by check-off)
-    models_changed = models_changed or self.latest_model_hash != p.sd_model.sd_model_hash
-    if not models_changed:
-      for (l_module, l_model, l_weight_unet, l_weight_tenc), (module, model, weight_unet, weight_tenc) in zip(self.latest_params, params):
-        if l_module != module or l_model != model or l_weight_unet != weight_unet or l_weight_tenc != weight_tenc:
-          models_changed = True
-          break
+    def process_batch(self, p, *args, **kwargs):
+        unet = p.sd_model.model.diffusion_model
+        text_encoder = p.sd_model.cond_stage_model
 
-    if models_changed:
-      self.restore_networks(p.sd_model)
-      self.latest_params = params
-      self.latest_model_hash = p.sd_model.sd_model_hash
+        self.restore_networks(p.sd_model)
+        Script.latest_model_hash = p.sd_model.sd_model_hash
+        for module, model, weight_unet, weight_tenc in Script.latest_params:
+            if model is None or model == "None" or len(model) == 0:
+                continue
+            if weight_unet == 0 and weight_tenc == 0:
+                print(f"ignore because weight is 0: {model}")
+                continue
 
-      for module, model, weight_unet, weight_tenc in self.latest_params:
-        if model is None or model == "None" or len(model) == 0:
-          continue
-        if weight_unet == 0 and weight_tenc == 0:
-          print(f"ignore because weight is 0: {model}")
-          continue
+            model_path = lora_models.get(model, None)
+            if model_path is None:
+                raise RuntimeError(f"model not found: {model}")
 
-        model_path = lora_models.get(model, None)
-        if model_path is None:
-          raise RuntimeError(f"model not found: {model}")
+            if model_path.startswith("\"") and model_path.endswith("\""):  # trim '"' at start/end
+                model_path = model_path[1:-1]
+            if not os.path.exists(model_path):
+                print(f"file not found: {model_path}")
+                continue
 
-        if model_path.startswith("\"") and model_path.endswith("\""):             # trim '"' at start/end
-          model_path = model_path[1:-1]
-        if not os.path.exists(model_path):
-          print(f"file not found: {model_path}")
-          continue
+            print(f"{module} weight_unet: {weight_unet}, weight_tenc: {weight_tenc}, model: {model}")
+            if module == "LoRA":
+                if os.path.splitext(model_path)[1] == '.safetensors':
+                    from safetensors.torch import load_file
+                    du_state_dict = load_file(model_path)
+                else:
+                    du_state_dict = torch.load(model_path, map_location='cpu')
 
-        print(f"{module} weight_unet: {weight_unet}, weight_tenc: {weight_tenc}, model: {model}")
-        if module == "LoRA":
-          if os.path.splitext(model_path)[1] == '.safetensors':
-            from safetensors.torch import load_file
-            du_state_dict = load_file(model_path)
-          else:
-            du_state_dict = torch.load(model_path, map_location='cpu')
+                network, info = lora_compvis.create_network_and_apply_compvis(du_state_dict, weight_tenc,
+                                                                              weight_unet, text_encoder, unet)
+                # in medvram, device is different for u-net and sd_model, so use sd_model's
+                network.to(p.sd_model.device, dtype=p.sd_model.dtype)
 
-          network, info = lora_compvis.create_network_and_apply_compvis(du_state_dict, weight_tenc, weight_unet, text_encoder, unet)
-          # in medvram, device is different for u-net and sd_model, so use sd_model's
-          network.to(p.sd_model.device, dtype=p.sd_model.dtype)
+                print(f"LoRA model {model} loaded: {info}")
+                Script.latest_networks.append((network, model))
+        if len(Script.latest_networks) > 0:
+            print("setting (or sd model) changed. new networks created.")
 
-          print(f"LoRA model {model} loaded: {info}")
-          self.latest_networks.append((network, model))
-      if len(self.latest_networks) > 0:
-        print("setting (or sd model) changed. new networks created.")
+        # apply mask: currently only top 3 networks are supported
+        # if len(self.latest_networks) > 0:
+        #     mask_image = args[-2]
+        #     if mask_image is not None:
+        #         mask_image = mask_image.astype(np.float32) / 255.0
+        #         print(f"use mask image to control LoRA regions.")
+        #         for i, (network, model) in enumerate(self.latest_networks[:3]):
+        #             if not hasattr(network, "set_mask"):
+        #                 continue
+        #             mask = mask_image[:, :, i]  # R,G,B
+        #             if mask.max() <= 0:
+        #                 continue
+        #             mask = torch.tensor(mask, dtype=p.sd_model.dtype, device=p.sd_model.device)
+        #             network.set_mask(mask, height=p.height, width=p.width)
+        #             print(f"apply mask. channel: {i}, model: {model}")
+        #     else:
+        #         for network, _ in self.latest_networks:
+        #             if hasattr(network, "set_mask"):
+        #                 network.set_mask(None)
 
-    # apply mask: currently only top 3 networks are supported
-    if len(self.latest_networks) > 0:
-      mask_image = args[-2]
-      if mask_image is not None:
-        mask_image = mask_image.astype(np.float32) / 255.0
-        print(f"use mask image to control LoRA regions.")
-        for i, (network, model) in enumerate(self.latest_networks[:3]):
-          if not hasattr(network, "set_mask"):
-            continue
-          mask = mask_image[:, :, i]               # R,G,B
-          if mask.max() <= 0:
-            continue
-          mask = torch.tensor(mask, dtype=p.sd_model.dtype, device=p.sd_model.device)
-          network.set_mask(mask, height=p.height, width=p.width)
-          print(f"apply mask. channel: {i}, model: {model}")
-      else:
-        for network, _ in self.latest_networks:
-          if hasattr(network, "set_mask"):
-            network.set_mask(None)
-
-    self.set_infotext_fields(p, self.latest_params)
+        self.set_infotext_fields(p, Script.latest_params)
+        Script.latest_params.clear()
+        Script.latest_networks.clear()
+        Script.latest_model_hash = ""
 
 
 def on_script_unloaded():
@@ -286,43 +292,76 @@ def on_ui_settings():
 
 
 def on_infotext_pasted(infotext, params):
-  if "AddNet Enabled" not in params:
-    params["AddNet Enabled"] = "False"
+    if "AddNet Enabled" not in params:
+        params["AddNet Enabled"] = "False"
 
-  # TODO changing "AddNet Separate Weights" does not seem to work
-  if "AddNet Separate Weights" not in params:
-    params["AddNet Separate Weights"] = "False"
+    # TODO changing "AddNet Separate Weights" does not seem to work
+    if "AddNet Separate Weights" not in params:
+        params["AddNet Separate Weights"] = "False"
 
-  for i in range(MAX_MODEL_COUNT):
-    # Convert combined weight into new format
-    if f"AddNet Weight {i+1}" in params:
-      params[f"AddNet Weight A {i+1}"] = params[f"AddNet Weight {i+1}"]
-      params[f"AddNet Weight B {i+1}"] = params[f"AddNet Weight {i+1}"]
+    for i in range(MAX_MODEL_COUNT):
+        # Convert combined weight into new format
+        if f"AddNet Weight {i + 1}" in params:
+            params[f"AddNet Weight A {i + 1}"] = params[f"AddNet Weight {i + 1}"]
+            params[f"AddNet Weight B {i + 1}"] = params[f"AddNet Weight {i + 1}"]
 
-    if f"AddNet Module {i+1}" not in params:
-      params[f"AddNet Module {i+1}"] = "LoRA"
-    if f"AddNet Model {i+1}" not in params:
-      params[f"AddNet Model {i+1}"] = "None"
-    if f"AddNet Weight A {i+1}" not in params:
-      params[f"AddNet Weight A {i+1}"] = "0"
-    if f"AddNet Weight B {i+1}" not in params:
-      params[f"AddNet Weight B {i+1}"] = "0"
+        if f"AddNet Module {i + 1}" not in params:
+            params[f"AddNet Module {i + 1}"] = "LoRA"
+        if f"AddNet Model {i + 1}" not in params:
+            params[f"AddNet Model {i + 1}"] = "None"
+        if f"AddNet Weight A {i + 1}" not in params:
+            params[f"AddNet Weight A {i + 1}"] = "0"
+        if f"AddNet Weight B {i + 1}" not in params:
+            params[f"AddNet Weight B {i + 1}"] = "0"
 
-    params[f"AddNet Weight {i+1}"] = params[f"AddNet Weight A {i+1}"]
+        params[f"AddNet Weight {i + 1}"] = params[f"AddNet Weight A {i + 1}"]
 
-    if params[f"AddNet Weight A {i+1}"] != params[f"AddNet Weight B {i+1}"]:
-      params["AddNet Separate Weights"] = "True"
+        if params[f"AddNet Weight A {i + 1}"] != params[f"AddNet Weight B {i + 1}"]:
+            params["AddNet Separate Weights"] = "True"
 
-    # Convert potential legacy name/hash to new format
-    params[f"AddNet Model {i+1}"] = str(model_util.find_closest_lora_model_name(params[f"AddNet Model {i+1}"]))
+        # Convert potential legacy name/hash to new format
+        params[f"AddNet Model {i + 1}"] = str(model_util.find_closest_lora_model_name(params[f"AddNet Model {i + 1}"]))
 
-    xyz_grid_support.update_axis_params(i, params[f"AddNet Module {i+1}"], params[f"AddNet Model {i+1}"])
+        xyz_grid_support.update_axis_params(i, params[f"AddNet Module {i + 1}"], params[f"AddNet Model {i + 1}"])
 
 
 xyz_grid_support.initialize(Script)
-
 
 script_callbacks.on_script_unloaded(on_script_unloaded)
 script_callbacks.on_ui_tabs(on_ui_tabs)
 script_callbacks.on_ui_settings(on_ui_settings)
 script_callbacks.on_infotext_pasted(on_infotext_pasted)
+
+
+class ApiHijack(api.Api):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.add_api_route("/select_lora", select_lora, methods=["POST"],
+                           response_model=SelectLoRAResponse)
+
+
+class ModelParam(BaseModel):
+    model_name: str
+    unet_weight: int
+    text_encoder_weight: int
+
+
+class SelectLoRARequest(BaseModel):
+    models: List[ModelParam]
+
+
+class SelectLoRAResponse(BaseModel):
+    result: str = Field(default=None, title="result", description="result of loading LoRA")
+
+
+def select_lora(select_lora_request: SelectLoRARequest):
+    params = []
+    for model in select_lora_request.models:
+        t = ("LoRA", model.model_name, model.unet_weight, model.text_encoder_weight)
+        params.append(t)
+    Script.latest_params = params
+    print("change lora params: ", Script.latest_params)
+    return SelectLoRAResponse(result="===success===")
+
+
+api.Api = ApiHijack

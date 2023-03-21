@@ -5,7 +5,6 @@ import modules.scripts as scripts
 from scripts import model_util, util
 from scripts.model_util import MAX_MODEL_COUNT
 
-
 LORA_TRAIN_METADATA_NAMES = {
     "ss_session_id": "Session ID",
     "ss_training_started_at": "Training started at",
