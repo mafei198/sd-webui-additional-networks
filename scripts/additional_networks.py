@@ -21,6 +21,7 @@ addnet_paste_params = {"txt2img": [], "img2img": []}
 
 class Script(scripts.Script):
     latest_params = [(None, None, None, None)] * MAX_MODEL_COUNT
+    changed = False
     latest_networks = []
     latest_model_hash = ""
 
@@ -32,125 +33,6 @@ class Script(scripts.Script):
 
     def show(self, is_img2img):
         return scripts.AlwaysVisible
-
-    def ui(self, is_img2img):
-        global addnet_paste_params
-        # NOTE: Changing the contents of `ctrls` means the XY Grid support may need
-        # to be updated, see xyz_grid_support.py
-        ctrls = []
-        weight_sliders = []
-        model_dropdowns = []
-
-        tabname = "txt2img"
-        if is_img2img:
-            tabname = "img2img"
-
-        paste_params = addnet_paste_params[tabname]
-        paste_params.clear()
-
-        self.infotext_fields = []
-        self.paste_field_names = []
-
-        with gr.Group():
-            with gr.Accordion('Additional Networks', open=False):
-                with gr.Row():
-                    enabled = gr.Checkbox(label='Enable', value=False)
-                    ctrls.append(enabled)
-                    self.infotext_fields.append((enabled, "AddNet Enabled"))
-                    separate_weights = gr.Checkbox(label='Separate UNet/Text Encoder weights', value=False)
-                    ctrls.append(separate_weights)
-                    self.infotext_fields.append((separate_weights, "AddNet Separate Weights"))
-
-                for i in range(MAX_MODEL_COUNT):
-                    with gr.Row():
-                        module = gr.Dropdown(["LoRA"], label=f"Network module {i + 1}", value="LoRA")
-                        model = gr.Dropdown(list(lora_models.keys()),
-                                            label=f"Model {i + 1}",
-                                            value="None")
-                        with gr.Row(visible=False):
-                            model_path = gr.Textbox(value="None", interactive=False, visible=False)
-                        model.change(lambda module, model, i=i: model_util.lora_models.get(model, "None"),
-                                     inputs=[module, model], outputs=[model_path])
-
-                        # Sending from the script UI to the metadata editor has to bypass
-                        # gradio since this button will exit the gr.Blocks context by the
-                        # time the metadata editor tab is created, so event handlers can't
-                        # be registered on it by then.
-                        model_info = gr.Button(value=memo_symbol,
-                                               elem_id=f"additional_networks_send_to_metadata_editor_{i}")
-                        model_info.click(fn=None, _js="addnet_send_to_metadata_editor", inputs=[module, model_path],
-                                         outputs=[])
-
-                        module.change(lambda module, model, i=i: xyz_grid_support.update_axis_params(i, module, model),
-                                      inputs=[module, model], outputs=[])
-                        model.change(lambda module, model, i=i: xyz_grid_support.update_axis_params(i, module, model),
-                                     inputs=[module, model], outputs=[])
-
-                        # perhaps there is no user to train Text Encoder only, Weight A is U-Net
-                        # The name of label will be changed in future (Weight A and B), but UNet and TEnc for now for easy understanding
-                        with gr.Column() as col:
-                            weight = gr.Slider(label=f"Weight {i + 1}", value=1.0, minimum=-1.0, maximum=2.0, step=.05,
-                                               visible=True)
-                            weight_unet = gr.Slider(label=f"UNet Weight {i + 1}", value=1.0, minimum=-1.0, maximum=2.0,
-                                                    step=.05, visible=False)
-                            weight_tenc = gr.Slider(label=f"TEnc Weight {i + 1}", value=1.0, minimum=-1.0, maximum=2.0,
-                                                    step=.05, visible=False)
-
-                        weight.change(lambda w: (w, w), inputs=[weight], outputs=[weight_unet, weight_tenc])
-                        paste_params.append({"module": module, "model": model})
-
-                    ctrls.extend((module, model, weight_unet, weight_tenc))
-                    weight_sliders.extend((weight, weight_unet, weight_tenc))
-                    model_dropdowns.append(model)
-
-                    self.infotext_fields.extend([
-                        (module, f"AddNet Module {i + 1}"),
-                        (model, f"AddNet Model {i + 1}"),
-                        (weight, f"AddNet Weight {i + 1}"),
-                        (weight_unet, f"AddNet Weight A {i + 1}"),
-                        (weight_tenc, f"AddNet Weight B {i + 1}"),
-                    ])
-
-                for _, field_name in self.infotext_fields:
-                    self.paste_field_names.append(field_name)
-
-                def update_weight_sliders(separate, *sliders):
-                    updates = []
-                    for w, w_unet, w_tenc in zip(*(iter(sliders),) * 3):
-                        if not separate:
-                            w_unet = w
-                            w_tenc = w
-                        updates.append(gr.Slider.update(visible=not separate))  # Combined
-                        updates.append(gr.Slider.update(visible=separate, value=w_unet))  # UNet
-                        updates.append(gr.Slider.update(visible=separate, value=w_tenc))  # TEnc
-                    return updates
-
-                separate_weights.change(update_weight_sliders, inputs=[separate_weights] + weight_sliders,
-                                        outputs=weight_sliders)
-
-                def refresh_all_models(*dropdowns):
-                    model_util.update_models()
-                    updates = []
-                    for dd in dropdowns:
-                        if dd in lora_models:
-                            selected = dd
-                        else:
-                            selected = "None"
-                        update = gr.Dropdown.update(value=selected, choices=list(lora_models.keys()))
-                        updates.append(update)
-                    return updates
-
-                # mask for regions
-                with gr.Accordion('Extra args', open=False):
-                    with gr.Row():
-                        mask_image = gr.Image(label='mask image:')
-                        ctrls.append(mask_image)
-
-                refresh_models = gr.Button(value='Refresh models')
-                refresh_models.click(refresh_all_models, inputs=model_dropdowns, outputs=model_dropdowns)
-                ctrls.append(refresh_models)
-
-        return ctrls
 
     def set_infotext_fields(self, p, params):
         for i, t in enumerate(params):
@@ -192,40 +74,46 @@ class Script(scripts.Script):
         unet = p.sd_model.model.diffusion_model
         text_encoder = p.sd_model.cond_stage_model
 
-        self.restore_networks(p.sd_model)
+        if Script.latest_params is None:
+            self.restore_networks(p.sd_model)
+            return
+
         Script.latest_model_hash = p.sd_model.sd_model_hash
-        for module, model, weight_unet, weight_tenc in Script.latest_params:
-            if model is None or model == "None" or len(model) == 0:
-                continue
-            if weight_unet == 0 and weight_tenc == 0:
-                print(f"ignore because weight is 0: {model}")
-                continue
+        if Script.changed:
+            self.restore_networks(p.sd_model)
+            for module, model, weight_unet, weight_tenc in Script.latest_params:
+                if model is None or model == "None" or len(model) == 0:
+                    continue
+                if weight_unet == 0 and weight_tenc == 0:
+                    print(f"ignore because weight is 0: {model}")
+                    continue
 
-            model_path = lora_models.get(model, None)
-            if model_path is None:
-                raise RuntimeError(f"model not found: {model}")
+                model_path = lora_models.get(model, None)
+                if model_path is None:
+                    raise RuntimeError(f"model not found: {model}")
 
-            if model_path.startswith("\"") and model_path.endswith("\""):  # trim '"' at start/end
-                model_path = model_path[1:-1]
-            if not os.path.exists(model_path):
-                print(f"file not found: {model_path}")
-                continue
+                if model_path.startswith("\"") and model_path.endswith("\""):  # trim '"' at start/end
+                    model_path = model_path[1:-1]
+                if not os.path.exists(model_path):
+                    print(f"file not found: {model_path}")
+                    continue
 
-            print(f"{module} weight_unet: {weight_unet}, weight_tenc: {weight_tenc}, model: {model}")
-            if module == "LoRA":
-                if os.path.splitext(model_path)[1] == '.safetensors':
-                    from safetensors.torch import load_file
-                    du_state_dict = load_file(model_path)
-                else:
-                    du_state_dict = torch.load(model_path, map_location='cpu')
+                print(f"{module} weight_unet: {weight_unet}, weight_tenc: {weight_tenc}, model: {model}")
+                if module == "LoRA":
+                    if os.path.splitext(model_path)[1] == '.safetensors':
+                        from safetensors.torch import load_file
+                        du_state_dict = load_file(model_path)
+                    else:
+                        du_state_dict = torch.load(model_path, map_location='cpu')
 
-                network, info = lora_compvis.create_network_and_apply_compvis(du_state_dict, weight_tenc,
-                                                                              weight_unet, text_encoder, unet)
-                # in medvram, device is different for u-net and sd_model, so use sd_model's
-                network.to(p.sd_model.device, dtype=p.sd_model.dtype)
+                    network, info = lora_compvis.create_network_and_apply_compvis(du_state_dict, weight_tenc,
+                                                                                  weight_unet, text_encoder, unet)
+                    # in medvram, device is different for u-net and sd_model, so use sd_model's
+                    network.to(p.sd_model.device, dtype=p.sd_model.dtype)
 
-                print(f"LoRA model {model} loaded: {info}")
-                Script.latest_networks.append((network, model))
+                    print(f"LoRA model {model} loaded: {info}")
+                    Script.latest_networks.append((network, model))
+
         if len(Script.latest_networks) > 0:
             print("setting (or sd model) changed. new networks created.")
 
@@ -250,7 +138,7 @@ class Script(scripts.Script):
         #                 network.set_mask(None)
 
         self.set_infotext_fields(p, Script.latest_params)
-        Script.latest_params.clear()
+        Script.changed = False
         Script.latest_networks.clear()
         Script.latest_model_hash = ""
 
@@ -263,32 +151,6 @@ def on_script_unloaded():
                 break
 
 
-def on_ui_tabs():
-  global addnet_paste_params
-  with gr.Blocks(analytics_enabled=False) as additional_networks_interface:
-    metadata_editor.setup_ui(addnet_paste_params)
-
-  return [(additional_networks_interface, "Additional Networks", "additional_networks")]
-
-
-def on_ui_settings():
-  section = ('additional_networks', "Additional Networks")
-  shared.opts.add_option("additional_networks_extra_lora_path", shared.OptionInfo(
-      "", """Extra paths to scan for LoRA models, comma-separated. Paths containing commas must be enclosed in double quotes. In the path, " (one quote) must be replaced by "" (two quotes).""", section=section))
-  shared.opts.add_option("additional_networks_sort_models_by", shared.OptionInfo(
-      "name", "Sort LoRA models by", gr.Radio, {"choices": ["name", "date", "path name", "rating", "has user metadata"]}, section=section))
-  shared.opts.add_option("additional_networks_reverse_sort_order", shared.OptionInfo(False, "Reverse model sort order", section=section))
-  shared.opts.add_option("additional_networks_model_name_filter", shared.OptionInfo("", "LoRA model name filter", section=section))
-  shared.opts.add_option("additional_networks_xy_grid_model_metadata", shared.OptionInfo(
-      "", "Metadata to show in XY-Grid label for Model axes, comma-separated (example: \"ss_learning_rate, ss_num_epochs\")", section=section))
-  shared.opts.add_option("additional_networks_hash_thread_count", shared.OptionInfo(
-      1, "# of threads to use for hash calculation (increase if using an SSD)", section=section))
-  shared.opts.add_option("additional_networks_back_up_model_when_saving", shared.OptionInfo(
-      True, "Make a backup copy of the model being edited when saving its metadata.", section=section))
-  shared.opts.add_option("additional_networks_show_only_safetensors", shared.OptionInfo(False, "Only show .safetensors format models", section=section))
-  shared.opts.add_option("additional_networks_show_only_models_with_metadata", shared.OptionInfo("disabled", "Only show models that have/don't have user-added metadata", gr.Radio, {"choices": ["disabled", "has metadata", "missing metadata"]}, section=section))
-  shared.opts.add_option("additional_networks_max_top_tags", shared.OptionInfo(20, "Max number of top tags to show", section=section))
-  shared.opts.add_option("additional_networks_max_dataset_folders", shared.OptionInfo(20, "Max number of dataset folders to show", section=section))
 
 
 def on_infotext_pasted(infotext, params):
@@ -328,8 +190,6 @@ def on_infotext_pasted(infotext, params):
 xyz_grid_support.initialize(Script)
 
 script_callbacks.on_script_unloaded(on_script_unloaded)
-script_callbacks.on_ui_tabs(on_ui_tabs)
-script_callbacks.on_ui_settings(on_ui_settings)
 script_callbacks.on_infotext_pasted(on_infotext_pasted)
 
 
@@ -338,6 +198,7 @@ class ApiHijack(api.Api):
         super().__init__(*args, **kwargs)
         self.add_api_route("/select_lora", select_lora, methods=["POST"],
                            response_model=SelectLoRAResponse)
+        self.add_api_route("/refresh_lora", refresh_lora, methods=["GET"])
 
 
 class ModelParam(BaseModel):
@@ -359,9 +220,20 @@ def select_lora(select_lora_request: SelectLoRARequest):
     for model in select_lora_request.models:
         t = ("LoRA", model.model_name, model.unet_weight, model.text_encoder_weight)
         params.append(t)
-    Script.latest_params = params
-    print("change lora params: ", Script.latest_params)
-    return SelectLoRAResponse(result="===success===")
+
+    if Script.latest_params != params:
+        Script.changed = True
+        Script.latest_params = params
+        print("[select_lora] lora models changed: ", Script.latest_params)
+
+    return SelectLoRAResponse(result="success")
+
+
+def refresh_lora():
+    model_util.update_models()
+    return {
+        "result": "success"
+    }
 
 
 api.Api = ApiHijack
