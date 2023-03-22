@@ -252,7 +252,7 @@ def get_all_models(paths, sort_by, filter_by):
 
     # Prevent a hypothetical "None.pt" from being listed.
     if name != "None":
-      full_name = name + f"({model_hash[0:12]})"
+      full_name = name
       res[full_name] = filename
       res_legacy[legacy_hash] = full_name
       cache_hashes[filename] = {"model": model_hash, "legacy": legacy_hash, "mtime": stat.st_mtime}

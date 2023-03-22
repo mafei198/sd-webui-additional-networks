@@ -139,7 +139,7 @@ class Script(scripts.Script):
 
         self.set_infotext_fields(p, Script.latest_params)
         Script.changed = False
-        Script.latest_networks.clear()
+
         Script.latest_model_hash = ""
 
 
