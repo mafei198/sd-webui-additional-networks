@@ -1,12 +1,14 @@
+import json
 import os
 from typing import List
 
+import filelock
 import torch
 import numpy as np
 from pydantic import BaseModel, Field
 
 import modules.scripts as scripts
-from modules import shared, script_callbacks
+from modules import shared, script_callbacks, hashes
 import gradio as gr
 
 import modules.ui
@@ -199,6 +201,7 @@ class ApiHijack(api.Api):
         self.add_api_route("/select_lora", select_lora, methods=["POST"],
                            response_model=SelectLoRAResponse)
         self.add_api_route("/refresh_lora", refresh_lora, methods=["GET"])
+        self.add_api_route("/refresh_hash_cache", refresh_hash_cache, methods=["GET"])
 
 
 class ModelParam(BaseModel):
@@ -231,6 +234,19 @@ def select_lora(select_lora_request: SelectLoRARequest):
 
 def refresh_lora():
     model_util.update_models()
+    return {
+        "result": "success"
+    }
+
+
+# 用于更新hash cache
+def refresh_hash_cache():
+    with filelock.FileLock(hashes.cache_filename + ".lock"):
+        if not os.path.isfile(hashes.cache_filename):
+            hashes.cache_data = {}
+        else:
+            with open(hashes.cache_filename, "r", encoding="utf8") as file:
+                hashes.cache_data = json.load(file)
     return {
         "result": "success"
     }
