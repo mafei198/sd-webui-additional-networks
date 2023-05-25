@@ -203,8 +203,8 @@ class ApiHijack(api.Api):
 
 class ModelParam(BaseModel):
     model_name: str
-    unet_weight: int
-    text_encoder_weight: int
+    unet_weight: float
+    text_encoder_weight: float
 
 
 class SelectLoRARequest(BaseModel):
