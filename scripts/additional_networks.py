@@ -256,8 +256,8 @@ def refresh_hash_cache(req: RefreshModelHashCacheRequest):
     hashes_dict = hashes.cache("hashes")
 
     hashes_dict[filename] = {
-        "mtime": time.gmtime(time.time()),
-        "sha256": hashlib.sha256(filename.encode('utf-8'))
+        "mtime": time.mktime(time.gmtime(time.time())),
+        "sha256": hashlib.sha256(filename.encode('utf-8')).hexdigest()
     }
     print(filename, "\n", hashes_dict[filename])
     return {
