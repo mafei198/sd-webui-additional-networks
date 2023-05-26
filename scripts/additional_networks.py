@@ -202,7 +202,7 @@ class ApiHijack(api.Api):
         self.add_api_route("/select_lora", select_lora, methods=["POST"],
                            response_model=SelectLoRAResponse)
         self.add_api_route("/refresh_lora", refresh_lora, methods=["GET"])
-        self.add_api_route("/refresh_hash_cache", refresh_hash_cache, methods=["GET"])
+        self.add_api_route("/refresh_hash_cache", refresh_hash_cache, methods=["POST"])
 
 
 class ModelParam(BaseModel):
