@@ -1,7 +1,8 @@
 import json
 import os
+import time
 from typing import List
-
+import hashlib
 import filelock
 import torch
 import numpy as np
@@ -239,14 +240,26 @@ def refresh_lora():
     }
 
 
-# 用于更新hash cache
-def refresh_hash_cache():
+class RefreshModelHashCacheRequest(BaseModel):
+    model_uri: str
+
+
+# 用于更新ckpt model hash cache
+def refresh_hash_cache(req: RefreshModelHashCacheRequest):
     with filelock.FileLock(hashes.cache_filename + ".lock"):
         if not os.path.isfile(hashes.cache_filename):
             hashes.cache_data = {}
         else:
             with open(hashes.cache_filename, "r", encoding="utf8") as file:
                 hashes.cache_data = json.load(file)
+    filename = "checkpoint/" + os.path.basename(req.model_uri)
+    hashes_dict = hashes.cache("hashes")
+
+    hashes_dict[filename] = {
+        "mtime": time.gmtime(time.time()),
+        "sha256": hashlib.sha256(filename)
+    }
+    print(filename, "\n", hashes_dict[filename])
     return {
         "result": "success"
     }
