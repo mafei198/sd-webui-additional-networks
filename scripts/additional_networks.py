@@ -246,17 +246,11 @@ class RefreshModelHashCacheRequest(BaseModel):
 
 # 用于更新ckpt model hash cache
 def refresh_hash_cache(req: RefreshModelHashCacheRequest):
-    with filelock.FileLock(hashes.cache_filename + ".lock"):
-        if not os.path.isfile(hashes.cache_filename):
-            hashes.cache_data = {}
-        else:
-            with open(hashes.cache_filename, "r", encoding="utf8") as file:
-                hashes.cache_data = json.load(file)
     filename = "checkpoint/" + os.path.basename(req.model_uri)
     hashes_dict = hashes.cache("hashes")
 
     hashes_dict[filename] = {
-        "mtime": time.mktime(time.gmtime(time.time())),
+        "mtime": time.mktime(time.gmtime(time.time()+1000.0)),
         "sha256": hashlib.sha256(filename.encode('utf-8')).hexdigest()
     }
     print(filename, "\n", hashes_dict[filename])
